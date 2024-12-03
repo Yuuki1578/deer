@@ -2,10 +2,11 @@ use std::env;
 use std::fs;
 use std::io::{self, Error, ErrorKind};
 use std::path::Path;
+use std::process::ExitCode;
 
 const CURRENT_PATH: &str = "./";
 
-fn read_recursive_inner<P>(path: P) -> io::Result<()>
+fn read_recursive<P>(path: P) -> io::Result<()>
 where
     P: AsRef<Path>,
 {
@@ -29,14 +30,20 @@ where
         }
 
         if dir_prop.is_dir() {
-            read_recursive_inner(dir_content.path())?;
+            read_recursive(dir_content.path())?;
         }
     }
 
     Ok(())
 }
 
-fn main() -> io::Result<()> {
+fn error(err: Error) -> ExitCode {
+    eprintln!("{err}");
+
+    return ExitCode::FAILURE;
+}
+
+fn main() -> ExitCode {
     let args: Vec<String> = env::args()
         .enumerate()
         .filter(|(n_args, _)| *n_args != 0)
@@ -44,12 +51,18 @@ fn main() -> io::Result<()> {
         .collect();
 
     if args.len() == 0 {
-        return read_recursive_inner(CURRENT_PATH);
+        match read_recursive(CURRENT_PATH) {
+            Ok(..) => return ExitCode::SUCCESS,
+            Err(err) => return error(err),
+        }
     }
 
     for path in args {
-        read_recursive_inner(path)?;
+        match read_recursive(path) {
+            Ok(..) => {}
+            Err(err) => return error(err),
+        }
     }
 
-    Ok(())
+    ExitCode::SUCCESS
 }
