@@ -1,9 +1,8 @@
 use std::env;
 use std::fs;
-use std::io::{self, Error, ErrorKind, Write};
+use std::io::{self, ErrorKind, Write};
 use std::path::Path;
 use std::process;
-use std::thread;
 
 pub const CURRENT_PATH: &str = "./";
 
@@ -14,50 +13,47 @@ pub enum ReportKind<'a> {
 }
 
 impl<'a> ReportKind<'a> {
-    pub fn report(self, stderr: &mut io::Stderr, error: &Error) -> io::Result<()> {
+    pub fn report<B, M>(self, buffer: &mut B, msg: &M) -> io::Result<()>
+    where
+        B: Write,
+        M: ToString,
+    {
         let msg = match self {
             Self::Recoverable(path) => {
-                String::new()
-                    + path
-                    + ": 
-                " + error.to_string().as_str()
-                    + "\n"
+                String::new() + path + ": " + msg.to_string().as_str() + "\n"
             }
 
-            Self::Fatal => error.to_string() + "\n",
+            Self::Fatal => msg.to_string() + "\n",
         };
 
-        let _ = stderr.write(msg.as_bytes())?;
+        let _ = buffer.write(msg.as_bytes())?;
 
         Ok(())
     }
 }
 
-pub fn read_dir<P>(path: P) -> io::Result<()>
+pub fn read_dir<P>(stdout: &mut io::Stdout, stderr: &mut io::Stderr, path: P) -> io::Result<()>
 where
     P: AsRef<Path>,
 {
     let current_dir = fs::read_dir(path)?;
 
-    let mut stdout = io::stdout();
-    let mut stderr = io::stderr();
-
     for dir_content in current_dir {
         let dir_content = match dir_content {
             Ok(dir_content) => dir_content,
+
             Err(error) => match error.kind() {
                 ErrorKind::PermissionDenied => {
-                    ReportKind::Recoverable(
-                        "Failed 
-                    to read directories",
-                    )
-                    .report(&mut stderr, &error)
-                    .unwrap_or(());
+                    ReportKind::Recoverable("Failed to read directories")
+                        .report(stderr, &error)
+                        .unwrap_or(());
+
                     continue;
                 }
 
                 _ => {
-                    ReportKind::Fatal.report(&mut stderr, &error).unwrap_or(());
+                    ReportKind::Fatal.report(stderr, &error).unwrap_or(());
+
                     continue;
                 }
             },
@@ -67,16 +63,19 @@ where
 
         let properties = match dir_content.metadata() {
             Ok(properties) => properties,
+
             Err(error) => match error.kind() {
                 ErrorKind::PermissionDenied => {
                     ReportKind::Recoverable(path.to_str().unwrap_or(""))
-                        .report(&mut stderr, &error)
+                        .report(stderr, &error)
                         .unwrap_or(());
+
                     continue;
                 }
 
                 _ => {
-                    ReportKind::Fatal.report(&mut stderr, &error).unwrap_or(());
+                    ReportKind::Fatal.report(stderr, &error).unwrap_or(());
+
                     continue;
                 }
             },
@@ -84,18 +83,13 @@ where
 
         if properties.is_file() || properties.is_symlink() {
             let as_path_str = path.to_str().unwrap_or("").to_string() + "\n";
-            let _ = stdout.write(as_path_str.as_bytes())?;
+            let _ = stdout.lock().write(as_path_str.as_bytes())?;
 
             continue;
         }
 
         if properties.is_dir() {
-            let task = thread::spawn(move || read_dir(path));
-
-            match task.join() {
-                Ok(value) => value.unwrap_or(()),
-                _ => continue,
-            }
+            read_dir(stdout, stderr, path).unwrap_or(());
         }
     }
 
@@ -103,28 +97,40 @@ where
 }
 
 fn main() {
+    let mut stdout = io::stdout();
     let mut stderr = io::stderr();
+    let mut has_error = false;
+    let mut exit_code: i32 = 0;
 
     let args: Vec<String> = env::args()
         .enumerate()
-        .filter(|(n_args, _)| *n_args != 0 && *n_args != usize::MAX)
-        .map(|(_, string)| string)
+        .filter(|(idx, _)| *idx != 0 && *idx != usize::MAX)
+        .map(|(_, args)| args)
         .collect();
 
     if args.len() == 0 {
-        match read_dir(CURRENT_PATH) {
+        match read_dir(&mut stdout, &mut stderr, CURRENT_PATH) {
             Ok(_) => return,
             Err(error) => {
                 ReportKind::Fatal.report(&mut stderr, &error).unwrap_or(());
-                process::exit(1);
+                process::exit(error.raw_os_error().unwrap_or(1));
             }
         }
     }
 
     for path in args {
-        match read_dir(path) {
+        match read_dir(&mut stdout, &mut stderr, path) {
             Ok(_) => {}
-            Err(error) => ReportKind::Fatal.report(&mut stderr, &error).unwrap_or(()),
+            Err(error) => {
+                ReportKind::Fatal.report(&mut stderr, &error).unwrap_or(());
+
+                exit_code = error.raw_os_error().unwrap_or(1);
+                has_error = true;
+            }
         }
+    }
+
+    if has_error {
+        process::exit(exit_code);
     }
 }
